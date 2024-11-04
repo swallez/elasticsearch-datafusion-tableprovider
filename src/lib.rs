@@ -29,7 +29,7 @@ mod expr;
 
 use std::any::Any;
 use std::env;
-use std::fmt::Formatter;
+use std::fmt::{Formatter, Pointer};
 use std::io::{Cursor, Read};
 use std::ops::Deref;
 use std::pin::Pin;
@@ -49,11 +49,13 @@ use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskCo
 use datafusion::logical_expr::{CreateExternalTable, Expr, LogicalPlan, TableProviderFilterPushDown};
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties};
+use datafusion::physical_plan::insert::{DataSink, DataSinkExec};
+use datafusion::physical_plan::metrics::MetricsSet;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::prelude::SessionContext;
 use elasticsearch::Elasticsearch;
 use elasticsearch::indices::IndicesGetMappingParts;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use crate::es_types::MappingResponse;
 use itertools::Itertools;
 use serde_json::json;
@@ -127,7 +129,7 @@ impl ElasticsearchTableProviderFactory {
                 "text" | "match_only_text" => DataType::Utf8,
                 "keyword" | "constant_keyword" | "wildcard" => DataType::Utf8,
 
-                "date" => DataType::Time64(TimeUnit::Millisecond),
+                "date" => DataType::Timestamp(TimeUnit::Millisecond, None),
                 "ip" => DataType::Binary,
                 "version" => DataType::Utf8,
 
@@ -135,9 +137,10 @@ impl ElasticsearchTableProviderFactory {
             };
 
             fields.push(Field::new(name, arrow_type, true));
+
         }
 
-        println!("ES index {} has {} fields.", index, &fields.len());
+        println!("Elasticsearch index '{}' has {} fields.", index, &fields.len());
 
         let schema = Schema::new(fields);
         Ok(Arc::new(schema))
@@ -150,6 +153,8 @@ impl TableProviderFactory for ElasticsearchTableProviderFactory {
     async fn create(&self, _state: &dyn Session, cmd: &CreateExternalTable) -> datafusion::common::Result<Arc<dyn TableProvider>> {
 
         use elasticsearch::auth::Credentials;
+
+        //println!("Cmd = {:?}", cmd);
 
         let mut location = &cmd.location;
         let mut creds: Option<Credentials> = None;
@@ -196,7 +201,7 @@ impl TableProviderFactory for ElasticsearchTableProviderFactory {
         // We always add the document `_id`, which is the primary key, as the first column in the schema.
         let constraints = Constraints::new_unverified(vec![Constraint::PrimaryKey(vec![0])]);
 
-        let index = cmd.name.table().to_string();
+        let index: Arc<str> = cmd.name.table().into();
 
         //---- Create the transport
         let pool = elasticsearch::http::transport::SingleNodeConnectionPool::new(url);
@@ -228,7 +233,7 @@ impl TableProviderFactory for ElasticsearchTableProviderFactory {
 
 struct ElasticsearchTableProvider {
     client: Arc<Elasticsearch>,
-    index: String,
+    index: Arc<str>,
     schema: SchemaRef,
     constraints: Constraints,
 }
@@ -352,8 +357,56 @@ impl TableProvider for ElasticsearchTableProvider {
         })
     }
 
-    async fn insert_into(&self, _state: &dyn Session, _input: Arc<dyn ExecutionPlan>, _overwrite: bool) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
-        not_impl_err!("Insert into not implemented for this table")
+    async fn insert_into(&self, _state: &dyn Session, input: Arc<dyn ExecutionPlan>, _overwrite: bool) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+        #[derive(Debug)]
+        struct EsDataSink {
+            client: Arc<Elasticsearch>,
+            index: Arc<str>,
+        }
+
+        impl EsDataSink {
+            async fn send_batch(&self, data: RecordBatch) -> DataFusionResult<u64> {
+                let _schema = data.schema();
+                let _client = &self.client;
+                let _index = &self.index;
+                not_impl_err!("Here we must send a bulk request to Elasticsearch")
+                //Ok(0)
+            }
+        }
+
+        impl DisplayAs for EsDataSink {
+            fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> std::fmt::Result {
+                self.fmt(f)
+            }
+        }
+
+        #[async_trait]
+        impl DataSink for EsDataSink {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn metrics(&self) -> Option<MetricsSet> {
+                None
+            }
+
+            async fn write_all(&self, mut data: SendableRecordBatchStream, _context: &Arc<TaskContext>) -> DataFusionResult<u64> {
+                let mut sum = 0;
+                while let Some(batch) = data.next().await {
+                    sum = sum + self.send_batch(batch?).await?;
+                }
+                Ok(sum)
+            }
+        }
+
+        let sink = EsDataSink {
+            client: self.client.clone(),
+            index: self.index.clone(),
+        };
+
+        let sink_exec = DataSinkExec::new(input, Arc::new(sink), self.schema.clone(), None);
+
+        Ok(Arc::new(sink_exec))
     }
 }
 
