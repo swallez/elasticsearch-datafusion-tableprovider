@@ -17,6 +17,12 @@
 
 //! Copy of datafusion-cli's main with an added Elasticsearch table provider.
 
+// After updating the original code, add these lines after `ctx.register_udtf("parquet_metadata"...`
+//
+//  // register the `ELASTICSEARCH` table provider
+//  dotenv::dotenv().ok();
+//  elasticsearch_datafusion_tableprovider::ElasticsearchTableProviderFactory::register(&ctx);
+
 use std::collections::HashMap;
 use std::env;
 use std::path::Path;
@@ -28,7 +34,7 @@ use datafusion::execution::context::SessionConfig;
 use datafusion::execution::memory_pool::{FairSpillPool, GreedyMemoryPool};
 use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv};
 use datafusion::prelude::SessionContext;
-use datafusion_cli::catalog::DynamicFileCatalog;
+use datafusion_cli::catalog::DynamicObjectStoreCatalog;
 use datafusion_cli::functions::ParquetMetadataFunc;
 use datafusion_cli::{
     exec,
@@ -39,7 +45,6 @@ use datafusion_cli::{
 };
 
 use clap::Parser;
-use elasticsearch_datafusion_tableprovider::ElasticsearchTableProviderFactory;
 // use mimalloc::MiMalloc;
 //
 // #[global_allocator]
@@ -52,7 +57,7 @@ struct Args {
         short = 'p',
         long,
         help = "Path to your data, default to current directory",
-        validator(is_valid_data_dir)
+        value_parser(parse_valid_data_dir)
     )]
     data_path: Option<String>,
 
@@ -60,16 +65,16 @@ struct Args {
         short = 'b',
         long,
         help = "The batch size of each query, or use DataFusion default",
-        validator(is_valid_batch_size)
+        value_parser(parse_batch_size)
     )]
     batch_size: Option<usize>,
 
     #[clap(
         short = 'c',
         long,
-        multiple_values = true,
+        num_args = 0..,
         help = "Execute the given command string(s), then exit. Commands are expected to be non empty.",
-        validator(is_valid_command)
+        value_parser(parse_command)
     )]
     command: Vec<String>,
 
@@ -77,30 +82,30 @@ struct Args {
         short = 'm',
         long,
         help = "The memory pool limitation (e.g. '10g'), default to None (no limit)",
-        validator(is_valid_memory_pool_size)
+        value_parser(extract_memory_pool_size)
     )]
-    memory_limit: Option<String>,
+    memory_limit: Option<usize>,
 
     #[clap(
         short,
         long,
-        multiple_values = true,
+        num_args = 0..,
         help = "Execute commands from file(s), then exit",
-        validator(is_valid_file)
+        value_parser(parse_valid_file)
     )]
     file: Vec<String>,
 
     #[clap(
         short = 'r',
         long,
-        multiple_values = true,
+        num_args = 0..,
         help = "Run the provided files on startup instead of ~/.datafusionrc",
-        validator(is_valid_file),
+        value_parser(parse_valid_file),
         conflicts_with = "file"
     )]
     rc: Option<Vec<String>>,
 
-    #[clap(long, arg_enum, default_value_t = PrintFormat::Automatic)]
+    #[clap(long, value_enum, default_value_t = PrintFormat::Automatic)]
     format: PrintFormat,
 
     #[clap(
@@ -141,7 +146,6 @@ pub async fn main() -> ExitCode {
 
 /// Main CLI entrypoint
 async fn main_inner() -> Result<()> {
-    dotenv::dotenv().ok();
     env_logger::init();
     let args = Args::parse();
 
@@ -164,8 +168,6 @@ async fn main_inner() -> Result<()> {
     let rt_config =
         // set memory pool size
         if let Some(memory_limit) = args.memory_limit {
-            // unwrap is safe here because is_valid_memory_pool_size already checked the value
-            let memory_limit = extract_memory_pool_size(&memory_limit).unwrap();
             // set memory pool type
             match args.mem_pool_type {
                 PoolType::Fair => rt_config
@@ -179,11 +181,13 @@ async fn main_inner() -> Result<()> {
 
     let runtime_env = create_runtime_env(rt_config.clone())?;
 
+    // enable dynamic file query
     let ctx =
-        SessionContext::new_with_config_rt(session_config.clone(), Arc::new(runtime_env));
+        SessionContext::new_with_config_rt(session_config.clone(), Arc::new(runtime_env))
+            .enable_url_table();
     ctx.refresh_catalogs().await?;
-    // install dynamic catalog provider that knows how to open files
-    ctx.register_catalog_list(Arc::new(DynamicFileCatalog::new(
+    // install dynamic catalog provider that can register required object stores
+    ctx.register_catalog_list(Arc::new(DynamicObjectStoreCatalog::new(
         ctx.state().catalog_list().clone(),
         ctx.state_weak_ref(),
     )));
@@ -191,7 +195,8 @@ async fn main_inner() -> Result<()> {
     ctx.register_udtf("parquet_metadata", Arc::new(ParquetMetadataFunc {}));
 
     // register the `ELASTICSEARCH` table provider
-    ElasticsearchTableProviderFactory::register(&ctx);
+    dotenv::dotenv().ok();
+    elasticsearch_datafusion_tableprovider::ElasticsearchTableProviderFactory::register(&ctx);
 
     let mut print_options = PrintOptions {
         format: args.format,
@@ -239,42 +244,35 @@ async fn main_inner() -> Result<()> {
 }
 
 fn create_runtime_env(rn_config: RuntimeConfig) -> Result<RuntimeEnv> {
-    RuntimeEnv::new(rn_config)
+    RuntimeEnv::try_new(rn_config)
 }
 
-fn is_valid_file(dir: &str) -> Result<(), String> {
+fn parse_valid_file(dir: &str) -> std::result::Result<String, String> {
     if Path::new(dir).is_file() {
-        Ok(())
+        Ok(dir.to_string())
     } else {
         Err(format!("Invalid file '{}'", dir))
     }
 }
 
-fn is_valid_data_dir(dir: &str) -> Result<(), String> {
+fn parse_valid_data_dir(dir: &str) -> std::result::Result<String, String> {
     if Path::new(dir).is_dir() {
-        Ok(())
+        Ok(dir.to_string())
     } else {
         Err(format!("Invalid data directory '{}'", dir))
     }
 }
 
-fn is_valid_batch_size(size: &str) -> Result<(), String> {
+fn parse_batch_size(size: &str) -> std::result::Result<usize, String> {
     match size.parse::<usize>() {
-        Ok(size) if size > 0 => Ok(()),
+        Ok(size) if size > 0 => Ok(size),
         _ => Err(format!("Invalid batch size '{}'", size)),
     }
 }
 
-fn is_valid_memory_pool_size(size: &str) -> Result<(), String> {
-    match extract_memory_pool_size(size) {
-        Ok(_) => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
-fn is_valid_command(command: &str) -> Result<(), String> {
+fn parse_command(command: &str) -> std::result::Result<String, String> {
     if !command.is_empty() {
-        Ok(())
+        Ok(command.to_string())
     } else {
         Err("-c flag expects only non empty commands".to_string())
     }
@@ -301,7 +299,7 @@ impl ByteUnit {
     }
 }
 
-fn extract_memory_pool_size(size: &str) -> Result<usize, String> {
+fn extract_memory_pool_size(size: &str) -> std::result::Result<usize, String> {
     fn byte_suffixes() -> &'static HashMap<&'static str, ByteUnit> {
         static BYTE_SUFFIXES: OnceLock<HashMap<&'static str, ByteUnit>> = OnceLock::new();
         BYTE_SUFFIXES.get_or_init(|| {
@@ -343,121 +341,5 @@ fn extract_memory_pool_size(size: &str) -> Result<usize, String> {
         Ok(memory_pool_size)
     } else {
         Err(format!("Invalid memory pool size '{}'", size))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use datafusion::assert_batches_eq;
-
-    fn assert_conversion(input: &str, expected: Result<usize, String>) {
-        let result = extract_memory_pool_size(input);
-        match expected {
-            Ok(v) => assert_eq!(result.unwrap(), v),
-            Err(e) => assert_eq!(result.unwrap_err(), e),
-        }
-    }
-
-    #[test]
-    fn memory_pool_size() -> Result<(), String> {
-        // Test basic sizes without suffix, assumed to be bytes
-        assert_conversion("5", Ok(5));
-        assert_conversion("100", Ok(100));
-
-        // Test various units
-        assert_conversion("5b", Ok(5));
-        assert_conversion("4k", Ok(4 * 1024));
-        assert_conversion("4kb", Ok(4 * 1024));
-        assert_conversion("20m", Ok(20 * 1024 * 1024));
-        assert_conversion("20mb", Ok(20 * 1024 * 1024));
-        assert_conversion("2g", Ok(2 * 1024 * 1024 * 1024));
-        assert_conversion("2gb", Ok(2 * 1024 * 1024 * 1024));
-        assert_conversion("3t", Ok(3 * 1024 * 1024 * 1024 * 1024));
-        assert_conversion("4tb", Ok(4 * 1024 * 1024 * 1024 * 1024));
-
-        // Test case insensitivity
-        assert_conversion("4K", Ok(4 * 1024));
-        assert_conversion("4KB", Ok(4 * 1024));
-        assert_conversion("20M", Ok(20 * 1024 * 1024));
-        assert_conversion("20MB", Ok(20 * 1024 * 1024));
-        assert_conversion("2G", Ok(2 * 1024 * 1024 * 1024));
-        assert_conversion("2GB", Ok(2 * 1024 * 1024 * 1024));
-        assert_conversion("2T", Ok(2 * 1024 * 1024 * 1024 * 1024));
-
-        // Test invalid input
-        assert_conversion(
-            "invalid",
-            Err("Invalid memory pool size 'invalid'".to_string()),
-        );
-        assert_conversion("4kbx", Err("Invalid memory pool size '4kbx'".to_string()));
-        assert_conversion(
-            "-20mb",
-            Err("Invalid numeric value in memory pool size '-20mb'".to_string()),
-        );
-        assert_conversion(
-            "-100",
-            Err("Invalid numeric value in memory pool size '-100'".to_string()),
-        );
-        assert_conversion(
-            "12k12k",
-            Err("Invalid memory pool size '12k12k'".to_string()),
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_parquet_metadata_works() -> Result<(), DataFusionError> {
-        let ctx = SessionContext::new();
-        ctx.register_udtf("parquet_metadata", Arc::new(ParquetMetadataFunc {}));
-
-        // input with single quote
-        let sql =
-            "SELECT * FROM parquet_metadata('../datafusion/core/tests/data/fixed_size_list_array.parquet')";
-        let df = ctx.sql(sql).await?;
-        let rbs = df.collect().await?;
-
-        let excepted = [
-            "+-------------------------------------------------------------+--------------+--------------------+-----------------------+-----------------+-----------+-------------+------------+----------------+-------+-----------+-----------+------------------+----------------------+-----------------+-----------------+-------------+------------------------------+-------------------+------------------------+------------------+-----------------------+-------------------------+",
-            "| filename                                                    | row_group_id | row_group_num_rows | row_group_num_columns | row_group_bytes | column_id | file_offset | num_values | path_in_schema | type  | stats_min | stats_max | stats_null_count | stats_distinct_count | stats_min_value | stats_max_value | compression | encodings                    | index_page_offset | dictionary_page_offset | data_page_offset | total_compressed_size | total_uncompressed_size |",
-            "+-------------------------------------------------------------+--------------+--------------------+-----------------------+-----------------+-----------+-------------+------------+----------------+-------+-----------+-----------+------------------+----------------------+-----------------+-----------------+-------------+------------------------------+-------------------+------------------------+------------------+-----------------------+-------------------------+",
-            "| ../datafusion/core/tests/data/fixed_size_list_array.parquet | 0            | 2                  | 1                     | 123             | 0         | 125         | 4          | \"f0.list.item\" | INT64 | 1         | 4         | 0                |                      | 1               | 4               | SNAPPY      | [RLE_DICTIONARY, PLAIN, RLE] |                   | 4                      | 46               | 121                   | 123                     |",
-            "+-------------------------------------------------------------+--------------+--------------------+-----------------------+-----------------+-----------+-------------+------------+----------------+-------+-----------+-----------+------------------+----------------------+-----------------+-----------------+-------------+------------------------------+-------------------+------------------------+------------------+-----------------------+-------------------------+",
-        ];
-        assert_batches_eq!(excepted, &rbs);
-
-        // input with double quote
-        let sql =
-            "SELECT * FROM parquet_metadata(\"../datafusion/core/tests/data/fixed_size_list_array.parquet\")";
-        let df = ctx.sql(sql).await?;
-        let rbs = df.collect().await?;
-        assert_batches_eq!(excepted, &rbs);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_parquet_metadata_works_with_strings() -> Result<(), DataFusionError> {
-        let ctx = SessionContext::new();
-        ctx.register_udtf("parquet_metadata", Arc::new(ParquetMetadataFunc {}));
-
-        // input with string columns
-        let sql =
-            "SELECT * FROM parquet_metadata('../parquet-testing/data/data_index_bloom_encoding_stats.parquet')";
-        let df = ctx.sql(sql).await?;
-        let rbs = df.collect().await?;
-
-        let excepted = [
-
-            "+-----------------------------------------------------------------+--------------+--------------------+-----------------------+-----------------+-----------+-------------+------------+----------------+------------+-----------+-----------+------------------+----------------------+-----------------+-----------------+--------------------+--------------------------+-------------------+------------------------+------------------+-----------------------+-------------------------+",
-            "| filename                                                        | row_group_id | row_group_num_rows | row_group_num_columns | row_group_bytes | column_id | file_offset | num_values | path_in_schema | type       | stats_min | stats_max | stats_null_count | stats_distinct_count | stats_min_value | stats_max_value | compression        | encodings                | index_page_offset | dictionary_page_offset | data_page_offset | total_compressed_size | total_uncompressed_size |",
-            "+-----------------------------------------------------------------+--------------+--------------------+-----------------------+-----------------+-----------+-------------+------------+----------------+------------+-----------+-----------+------------------+----------------------+-----------------+-----------------+--------------------+--------------------------+-------------------+------------------------+------------------+-----------------------+-------------------------+",
-            "| ../parquet-testing/data/data_index_bloom_encoding_stats.parquet | 0            | 14                 | 1                     | 163             | 0         | 4           | 14         | \"String\"       | BYTE_ARRAY | Hello     | today     | 0                |                      | Hello           | today           | GZIP(GzipLevel(6)) | [BIT_PACKED, RLE, PLAIN] |                   |                        | 4                | 152                   | 163                     |",
-            "+-----------------------------------------------------------------+--------------+--------------------+-----------------------+-----------------+-----------+-------------+------------+----------------+------------+-----------+-----------+------------------+----------------------+-----------------+-----------------+--------------------+--------------------------+-------------------+------------------------+------------------+-----------------------+-------------------------+"
-        ];
-        assert_batches_eq!(excepted, &rbs);
-
-        Ok(())
     }
 }

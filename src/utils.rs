@@ -21,6 +21,8 @@ pub fn enforce_schema(rb: RecordBatch, target_schema: &SchemaRef) -> arrow::erro
                         field.name()
                     )))
                     .and_then(|original_array| {
+                        // TODO: check if the incoming type is unexpectedly multivalued
+                        // and provide guidance to add the required metadata.
                         arrow_cast::cast(original_array.as_ref(), field.data_type())
                     })
             })

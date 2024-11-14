@@ -32,7 +32,6 @@ pub fn add_expr(expr: &Expr, mut depth: usize, esql: &mut String) -> ExprResult 
         Case(_) |
         Cast(_) |
         TryCast(_) |
-        Sort(_) |
         ScalarFunction(_) |
         AggregateFunction(_) |
         WindowFunction(_) |

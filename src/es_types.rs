@@ -16,7 +16,28 @@ pub struct Mapping {
 #[derive(Deserialize)]
 pub struct FieldMapping {
     #[serde(rename = "type")]
-    pub type_: String
+    pub type_: String,
+    pub meta: Option<FieldMetadata>
+}
+
+impl FieldMapping {
+    /// A `"multivalued": "true"` metadata property in the field mapping indicates that this field is multivalued
+    pub fn is_multivalued(&self) -> bool {
+        let Some(meta) = &self.meta else {
+            return false
+        };
+        
+        let Some(multivalued) = &meta.multivalued else {
+            return false;
+        };
+        
+        multivalued == "true"
+    }
+}
+
+#[derive(Deserialize)]
+pub struct FieldMetadata {
+    pub multivalued: Option<String>
 }
 
 

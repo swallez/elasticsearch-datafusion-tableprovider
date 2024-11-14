@@ -28,8 +28,9 @@ mod utils;
 mod expr;
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::env;
-use std::fmt::{Formatter, Pointer};
+use std::fmt::{Debug, Formatter};
 use std::io::{Cursor, Read};
 use std::ops::Deref;
 use std::pin::Pin;
@@ -47,6 +48,7 @@ use datafusion::error::DataFusionError;
 use datafusion::error::Result as DataFusionResult;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::{CreateExternalTable, Expr, LogicalPlan, TableProviderFilterPushDown};
+use datafusion::logical_expr::dml::InsertOp;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties};
 use datafusion::physical_plan::insert::{DataSink, DataSinkExec};
@@ -65,6 +67,7 @@ use crate::utils::convert_error;
 //-------------------------------------------------------------------------------------------------
 // ElasticsearchTableProviderFactory
 
+#[derive(Debug)]
 pub struct ElasticsearchTableProviderFactory {
 }
 
@@ -82,7 +85,7 @@ impl ElasticsearchTableProviderFactory {
         );
 
         // DataFusion tries to find an ObjectStore implementation for every URL. So register a dummy
-        // store for the "env:" scheme that we used to read the configuratin from environment variables.
+        // store for the "env:" scheme that we use to read the configuration from environment variables.
         let env_url = Url::parse("env:").unwrap();
         ctx.register_object_store(&env_url, Arc::new(object_store::memory::InMemory::new()));
     }
@@ -97,9 +100,6 @@ impl ElasticsearchTableProviderFactory {
                 format!("Error reading '{index}' mappings ({})", response.status_code().as_u16())
             ));
         }
-
-        //let bytes = response.text().await.map_err(convert_error)?;
-        //let mut mappings: MappingResponse = serde_json::from_str(&bytes).map_err(convert_error)?;
 
         let mut mappings: MappingResponse = response.json().await.map_err(convert_error)?;
 
@@ -136,11 +136,14 @@ impl ElasticsearchTableProviderFactory {
                 _ => return Err(DataFusionError::Execution(format!("Unsupported field type {}", prop.type_))),
             };
 
-            fields.push(Field::new(name, arrow_type, true));
-
+            if prop.is_multivalued() {
+                fields.push(Field::new(name, DataType::List(FieldRef::new(Field::new("items", arrow_type, true))), true));
+            } else {
+                fields.push(Field::new(name, arrow_type, true));
+            }
         }
 
-        println!("Elasticsearch index '{}' has {} fields.", index, &fields.len());
+        // println!("Elasticsearch index '{}' has {} fields.", index, &fields.len());
 
         let schema = Schema::new(fields);
         Ok(Arc::new(schema))
@@ -204,7 +207,7 @@ impl TableProviderFactory for ElasticsearchTableProviderFactory {
         let index: Arc<str> = cmd.name.table().into();
 
         //---- Create the transport
-        let pool = elasticsearch::http::transport::SingleNodeConnectionPool::new(url);
+        let pool = elasticsearch::http::transport::SingleNodeConnectionPool::new(url.clone());
         let mut transport = elasticsearch::http::transport::TransportBuilder::new(pool);
         if let Some(creds) = creds {
             transport = transport.auth(creds);
@@ -218,6 +221,7 @@ impl TableProviderFactory for ElasticsearchTableProviderFactory {
         let schema = self.read_schema(&client, &index, expose_id).await?;
 
         let table = ElasticsearchTableProvider {
+            url,
             client: Arc::new(client),
             constraints,
             schema,
@@ -232,10 +236,19 @@ impl TableProviderFactory for ElasticsearchTableProviderFactory {
 // ElasticsearchTableProvider
 
 struct ElasticsearchTableProvider {
+    url: Url,
     client: Arc<Elasticsearch>,
     index: Arc<str>,
     schema: SchemaRef,
     constraints: Constraints,
+}
+
+impl Debug for ElasticsearchTableProvider {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ElasticsearchTableProvider")
+            .field("url", &self.url)
+            .finish()
+    }
 }
 
 // A `TableProvider` is a bridge to a single table's data. It has to be understood as a provider
@@ -311,7 +324,7 @@ impl TableProvider for ElasticsearchTableProvider {
         None
     }
 
-    fn get_logical_plan(&self) -> Option<&LogicalPlan> {
+    fn get_logical_plan(&self) -> Option<Cow<LogicalPlan>> {
         None
     }
 
@@ -357,7 +370,7 @@ impl TableProvider for ElasticsearchTableProvider {
         })
     }
 
-    async fn insert_into(&self, _state: &dyn Session, input: Arc<dyn ExecutionPlan>, _overwrite: bool) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+    async fn insert_into(&self, _state: &dyn Session, input: Arc<dyn ExecutionPlan>, _op: InsertOp) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
         #[derive(Debug)]
         struct EsDataSink {
             client: Arc<Elasticsearch>,
