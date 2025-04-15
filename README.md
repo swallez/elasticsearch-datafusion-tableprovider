@@ -25,4 +25,4 @@ When using an env url, the configuration is read from environment variables. Ass
 * `ELASTICSEARCH_PRODUCTS_API_KEY`: API key authentication (other schemes aren't implemented yet for env URLs)
 
 
-License: AGPL-3
+License: Apache-2

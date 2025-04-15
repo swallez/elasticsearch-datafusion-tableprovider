@@ -23,6 +23,8 @@
 //  dotenv::dotenv().ok();
 //  elasticsearch_datafusion_tableprovider::ElasticsearchTableProviderFactory::register(&ctx);
 
+//mod pg_table;
+
 use std::collections::HashMap;
 use std::env;
 use std::path::Path;
@@ -32,7 +34,7 @@ use std::sync::{Arc, OnceLock};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::context::SessionConfig;
 use datafusion::execution::memory_pool::{FairSpillPool, GreedyMemoryPool};
-use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv};
+use datafusion::execution::runtime_env::{RuntimeEnvBuilder, RuntimeEnv};
 use datafusion::prelude::SessionContext;
 use datafusion_cli::catalog::DynamicObjectStoreCatalog;
 use datafusion_cli::functions::ParquetMetadataFunc;
@@ -164,7 +166,7 @@ async fn main_inner() -> Result<()> {
         session_config = session_config.with_batch_size(batch_size);
     };
 
-    let rt_config = RuntimeConfig::new();
+    let rt_config = RuntimeEnvBuilder::new();
     let rt_config =
         // set memory pool size
         if let Some(memory_limit) = args.memory_limit {
@@ -243,8 +245,8 @@ async fn main_inner() -> Result<()> {
     Ok(())
 }
 
-fn create_runtime_env(rn_config: RuntimeConfig) -> Result<RuntimeEnv> {
-    RuntimeEnv::try_new(rn_config)
+fn create_runtime_env(rn_config: RuntimeEnvBuilder) -> Result<RuntimeEnv> {
+    rn_config.build()
 }
 
 fn parse_valid_file(dir: &str) -> std::result::Result<String, String> {

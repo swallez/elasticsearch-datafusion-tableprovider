@@ -40,6 +40,7 @@ use async_trait::async_trait;
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::ipc::reader::StreamReader;
+use datafusion::arrow::ipc::writer::StreamWriter;
 use datafusion::catalog::{Session, TableProviderFactory};
 use datafusion::common::{not_impl_err, plan_err, project_schema, ColumnStatistics, Constraint, Constraints, Statistics};
 use datafusion::common::stats::Precision;
@@ -50,12 +51,15 @@ use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskCo
 use datafusion::logical_expr::{CreateExternalTable, Expr, LogicalPlan, TableProviderFilterPushDown};
 use datafusion::logical_expr::dml::InsertOp;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties};
+use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::insert::{DataSink, DataSinkExec};
 use datafusion::physical_plan::metrics::MetricsSet;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::prelude::SessionContext;
 use elasticsearch::Elasticsearch;
+use elasticsearch::http::headers::HeaderMap;
+use elasticsearch::http::Method;
 use elasticsearch::indices::IndicesGetMappingParts;
 use futures::{Stream, StreamExt};
 use crate::es_types::MappingResponse;
@@ -360,6 +364,7 @@ impl TableProvider for ElasticsearchTableProvider {
             null_count: Precision::Exact(20),
             max_value: Precision::Absent,
             min_value: Precision::Absent,
+            sum_value: Precision::Absent,
             distinct_count: Precision::Exact(10000),
         }).collect();
 
@@ -370,20 +375,45 @@ impl TableProvider for ElasticsearchTableProvider {
         })
     }
 
-    async fn insert_into(&self, _state: &dyn Session, input: Arc<dyn ExecutionPlan>, _op: InsertOp) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+    async fn insert_into(&self, _state: &dyn Session, input: Arc<dyn ExecutionPlan>, insert_op: InsertOp) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
         #[derive(Debug)]
         struct EsDataSink {
             client: Arc<Elasticsearch>,
             index: Arc<str>,
+            op_type: &'static str,
         }
 
         impl EsDataSink {
             async fn send_batch(&self, data: RecordBatch) -> DataFusionResult<u64> {
                 let _schema = data.schema();
-                let _client = &self.client;
-                let _index = &self.index;
-                not_impl_err!("Here we must send a bulk request to Elasticsearch")
+                let client = &self.client;
+                let index = &self.index;
+                //not_impl_err!("Here we must send a bulk request to Elasticsearch")
                 //Ok(0)
+
+                let mut headers = HeaderMap::new();
+                headers.insert("Content-Type", "application/vnd.apache.arrow.stream".parse().unwrap());
+                headers.insert("Accept", "application/vnd.apache.arrow.stream".parse().unwrap());
+
+                let mut buffer = Vec::with_capacity(8192);
+                let mut writer = StreamWriter::try_new(&mut buffer, &data.schema())?;
+                writer.write(&data)?;
+                writer.finish()?;
+
+                client.transport()
+                    .send(Method::Post, &format!("/_arrow/{index}/_bulk"),
+                        headers,
+                        Some(&("op-type", self.op_type)), // query string
+                        Some(&buffer), // body
+                        None // timeout
+                    )
+                    .await
+                    .map_err(|e| DataFusionError::External(e.into()))?;
+
+                // FIXME: read result and handle errors
+
+                Ok(data.num_rows() as u64)
+
             }
         }
 
@@ -395,6 +425,9 @@ impl TableProvider for ElasticsearchTableProvider {
 
         #[async_trait]
         impl DataSink for EsDataSink {
+
+            fn schema(&self) -> &Arc<datafusion::arrow::datatypes::Schema> { todo!() }
+
             fn as_any(&self) -> &dyn Any {
                 self
             }
@@ -412,12 +445,22 @@ impl TableProvider for ElasticsearchTableProvider {
             }
         }
 
+        println!("Insert into {insert_op} {:?}", &input);
+
+        let op_type = match insert_op {
+            InsertOp::Append => "create",
+            InsertOp::Replace => "update",
+            InsertOp::Overwrite => // Replace the contents of an existing index
+                return not_impl_err!("Overwrite not implemented"),
+        };
+
         let sink = EsDataSink {
             client: self.client.clone(),
             index: self.index.clone(),
+            op_type,
         };
 
-        let sink_exec = DataSinkExec::new(input, Arc::new(sink), self.schema.clone(), None);
+        let sink_exec = DataSinkExec::new(input, Arc::new(sink), None);
 
         Ok(Arc::new(sink_exec))
     }
@@ -445,7 +488,8 @@ impl ElasticsearchExecutionPlan {
             properties: PlanProperties::new(
                 EquivalenceProperties::new(schema.clone()),
                 Partitioning::UnknownPartitioning(1),
-                ExecutionMode::Bounded,
+                EmissionType::Final,
+                Boundedness::Bounded,
             ),
             client,
             query,

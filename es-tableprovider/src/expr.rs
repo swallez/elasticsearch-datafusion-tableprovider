@@ -10,6 +10,7 @@ pub fn add_expr(expr: &Expr, mut depth: usize, esql: &mut String) -> ExprResult 
 
     depth = depth + 1;
 
+    #[allow(deprecated)] // Wildcard
     match expr {
         BinaryExpr(b) => add_binary_expr(b, depth, esql),
         Literal(l) => add_literal(l, depth, esql),
@@ -50,7 +51,7 @@ pub fn add_expr(expr: &Expr, mut depth: usize, esql: &mut String) -> ExprResult 
 fn add_column(c: &Column, _depth: usize, esql: &mut String) -> Result<(), DataFusionError> {
     // Note: DF ensures the column belongs to this table provider. In the context of ES
     // we only care about the table name which is the index name.
-    
+
     esql.push('`'); // Always escape column names
     esql.push_str(&c.name);
     esql.push('`');

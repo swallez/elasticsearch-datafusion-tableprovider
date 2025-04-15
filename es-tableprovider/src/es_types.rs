@@ -26,11 +26,11 @@ impl FieldMapping {
         let Some(meta) = &self.meta else {
             return false
         };
-        
+
         let Some(multivalued) = &meta.multivalued else {
             return false;
         };
-        
+
         multivalued == "true"
     }
 }
@@ -43,7 +43,6 @@ pub struct FieldMetadata {
 
 #[cfg(test)]
 mod tests {
-    use elasticsearch::params::Features::Mappings;
     use super::*;
 
     #[test]
@@ -52,7 +51,7 @@ mod tests {
         {"employees":{"mappings":{"properties":{"avg_worked_seconds":{"type":"long"},"birth_date":{"type":"date"},"emp_no":{"type":"integer"},"first_name":{"type":"keyword"},"gender":{"type":"keyword"},"height":{"type":"double","fields":{"float":{"type":"float"},"half_float":{"type":"half_float"},"scaled_float":{"type":"scaled_float","scaling_factor":100.0}}},"hire_date":{"type":"date"},"is_rehired":{"type":"boolean"},"job_positions":{"type":"keyword"},"languages":{"type":"integer","fields":{"byte":{"type":"byte"},"long":{"type":"long"},"short":{"type":"short"}}},"last_name":{"type":"keyword"},"salary":{"type":"integer"},"salary_change":{"type":"double","fields":{"int":{"type":"integer"},"keyword":{"type":"keyword"},"long":{"type":"long"}}},"still_hired":{"type":"boolean"}}}}}
         "#;
 
-        let mappings: MappingResponse = serde_json::from_str(json).unwrap();
+        let _mappings: MappingResponse = serde_json::from_str(json).unwrap();
 
     }
 }
