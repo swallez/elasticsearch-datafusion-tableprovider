@@ -23,7 +23,7 @@
 //  dotenv::dotenv().ok();
 //  elasticsearch_datafusion_tableprovider::ElasticsearchTableProviderFactory::register(&ctx);
 
-//mod pg_table;
+mod pg_table;
 
 use std::collections::HashMap;
 use std::env;
@@ -199,6 +199,8 @@ async fn main_inner() -> Result<()> {
     // register the `ELASTICSEARCH` table provider
     dotenv::dotenv().ok();
     elasticsearch_datafusion_tableprovider::ElasticsearchTableProviderFactory::register(&ctx);
+
+    pg_table::register(&ctx);
 
     let mut print_options = PrintOptions {
         format: args.format,
