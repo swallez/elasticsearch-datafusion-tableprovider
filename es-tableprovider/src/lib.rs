@@ -172,19 +172,23 @@ impl TableProviderFactory for ElasticsearchTableProviderFactory {
                 .map_err(convert_error)?;
             location = &env_str;
 
-            creds = Some(Credentials::EncodedApiKey(
-                env::var(format!("ELASTICSEARCH_{name}_API_KEY"))
-                    .map_err(convert_error)?
-            ));
+            creds = if let Ok(api_key) = env::var(format!("ELASTICSEARCH_{name}_API_KEY")) {
+                Some(Credentials::EncodedApiKey(api_key))
+            } else if let Ok(login) = env::var(format!("ELASTICSEARCH_{name}_LOGIN")) {
+                let pwd = env::var(format!("ELASTICSEARCH_{name}_PASSWORD"))
+                    .map_err(convert_error)?;
+                Some(Credentials::Basic(login, pwd))
+            } else {
+                None
+            };
         }
 
-        let url = url::Url::parse(location)
+        let url = Url::parse(location)
             .or_else(|_| Err(DataFusionError::Configuration(format!("Invalid URL {}", &cmd.location))))?;
 
         //---- Credentials
-        // TODO: read credentials from a config file.
         let creds = if let Some(creds) = creds {
-            // Defined in the env file
+            // Defined by env variables
             Some(creds)
         }
         else if let Some(api_key) = cmd.options.get("api-key") {
